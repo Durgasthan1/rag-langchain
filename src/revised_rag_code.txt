@@ -1,0 +1,141 @@
+# =======================
+# Environment Setup
+# =======================
+# Install dependencies if not already installed
+# !pip install sentence-transformers langchain chromadb PyPDF2 tiktoken
+# !pip install -U langchain-community # Install the langchain-community package to access Chroma
+
+# =======================
+# Imports
+# =======================
+from langchain.vectorstores import Chroma
+from langchain.embeddings import HuggingFaceEmbeddings
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.chains import RetrievalQA
+from langchain.chat_models import ChatOpenAI
+from langchain.docstore.document import Document
+import PyPDF2
+from rank_bm25 import BM25Okapi
+import numpy as np
+import os
+
+# =======================
+# Configuration
+# =======================
+FILE_PATH = "/content/registered_agreement.pdf"
+QUERY = "Who is the first applicant?"
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "your-openai-api-key-here")
+
+# =======================
+# Retriever Class
+# =======================
+  class Retriever:
+      def __init__(self, file_path: str):
+        self.file_path = file_path
+        self.db = None
+        self.text_chunks = []  # List to hold the text chunks for BM25 and vector searches
+
+    def load_and_split(self):
+        with open(self.file_path, 'rb') as pdf_file:
+            pdf_reader = PyPDF2.PdfReader(pdf_file)
+            text = ""
+            for page_num, page in enumerate(pdf_reader.pages):
+                page_text = page.extract_text()
+                if page_text:
+                    text += f"\n\nPage {page_num + 1}:\n{page_text}"
+
+        docs = [Document(page_content=text, metadata={"source": self.file_path})]
+
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=500,
+            chunk_overlap=50,
+            separators=["\n\n", "\n", ".", " ", ""]
+        )
+        split_docs = splitter.split_documents(docs)
+        self.text_chunks = [doc.page_content for doc in split_docs]
+        return split_docs
+    
+    def build_vector_store(self, texts):
+        embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+        self.db = Chroma.from_documents(texts, embedding=embeddings)
+  
+    def vector_search(self, query, k=5):
+        return self.db.similarity_search(query, k=k)
+
+    def build_bm25_index(self):
+        return BM25Okapi([doc.split() for doc in self.text_chunks])
+
+    def bm25_search(self, query, k=5):
+        bm25 = self.build_bm25_index()
+        query_tokens = query.split()
+        scores = bm25.get_scores(query_tokens)
+        ranked_indices = np.argsort(scores)[::-1]
+        return [self.text_chunks[i] for i in ranked_indices[:k]]
+
+      def precision_recall_at_k(self, retrieved_indices, ground_truth_indices, k=5):
+        retrieved_set = set(retrieved_indices[:k])
+        ground_truth_set = set(ground_truth_indices)
+        precision = len(retrieved_set & ground_truth_set) / k
+        recall = len(retrieved_set & ground_truth_set) / len(ground_truth_set) if ground_truth_set else 0
+        return precision, recall
+
+# =======================
+# RAGChain Class
+# =======================
+class RAGChain:
+    def __init__(self, retriever: Retriever, openai_api_key: str):
+        self.llm = ChatOpenAI(temperature=0.3, openai_api_key=openai_api_key)
+        self.chain = RetrievalQA.from_chain_type(
+            llm=self.llm,
+            retriever=retriever.db.as_retriever(),
+            return_source_documents=True
+        )
+
+    def run(self, query: str):
+        result = self.chain(query)
+        return result["result"], result["source_documents"]
+
+# =======================
+# Main Pipeline
+# =======================
+def main():
+    retriever = Retriever(FILE_PATH)
+
+    # Step 1: Load and split PDF
+    docs = retriever.load_and_split()
+
+    # Step 2: Build vector store
+    retriever.build_vector_store(docs)
+
+    # Step 3: Create RAG chain
+    rag = RAGChain(retriever, OPENAI_API_KEY)
+
+    # Step 4: Run query
+    answer, sources = rag.run(QUERY)
+    print("\n✅ Final Answer:\n", answer)
+
+    print("\n📚 Source Documents:")
+    for doc in sources:
+        print("-", doc.metadata.get("source", "Unknown"))
+
+    # Step 5: Vector Search Evaluation
+    vector_results = retriever.vector_search(QUERY, k=5)
+    vector_indices = [
+        i for i, content in enumerate(retriever.text_chunks)
+        if any(content in r.page_content for r in vector_results)
+    ]
+    ground_truth_indices = [0, 1]  # Replace with actual ground truth
+    p_vec, r_vec = retriever.precision_recall_at_k(vector_indices, ground_truth_indices, k=5)
+    print(f"\n📈 Vector Precision@5: {p_vec:.2f}, Recall@5: {r_vec:.2f}")
+
+    # Step 6: BM25 Search Evaluation
+    bm25_results = retriever.bm25_search(QUERY, k=5)
+    bm25_indices = [
+        i for i, content in enumerate(retriever.text_chunks)
+        if content in bm25_results
+    ]
+    p_bm25, r_bm25 = retriever.precision_recall_at_k(bm25_indices, ground_truth_indices, k=5)
+    print(f"\n📉 BM25 Precision@5: {p_bm25:.2f}, Recall@5: {r_bm25:.2f}")
+
+if __name__ == "__main__":
+    main()

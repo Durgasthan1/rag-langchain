@@ -1,0 +1,12 @@
+fastapi==0.95.2
+uvicorn[standard]==0.22.0
+langchain==0.0.208
+langchain-community==0.0.37
+chromadb==0.3.25
+sentence-transformers==2.2.2
+transformers==4.33.2
+openai==0.27.8
+PyPDF2==3.0.1
+rank_bm25==0.2.2
+numpy==1.26.4
+python-dotenv==1.0.0
